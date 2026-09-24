@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="v5-session" content="__V5_SESSION__"><title>知据 · v5 知识库助手</title><link rel="stylesheet" href="/preview.css"><script src="/preview.js" defer></script></head>
+<body>
+<header><a class="brand" href="/" aria-label="知识库助手首页"><span class="brand-mark" aria-hidden="true">据</span><span>知据 <small>你的知识库助手</small></span></a><div class="header-right"><span class="version">v5 体验版</span><span id="service" class="badge">服务启动中</span></div></header>
+<main>
+<aside>
+<div class="section-title"><h1>有什么想核实的？</h1><button id="new-question" class="quiet" type="button">新问题 ＋</button></div>
+<p class="intro">用日常的话提问，从你的文件里找依据。需要算金额时，请明确要算什么，并给出已知条件。</p>
+<label class="input-label" for="question">你的问题</label><textarea id="question" maxlength="2000" rows="7" placeholder="例如：合同签了两年，公司约定六个月试用期，合法吗？"></textarea><div class="input-meta"><span>写清年份、对象和金额，更容易找准依据</span><span id="question-count">0 / 2000</span></div>
+<div class="permissions"><h2>本次使用方式</h2>
+<label class="consent"><input type="checkbox" id="cloud" disabled><span>允许 Kimi 理解问题，辅助查找</span></label><p class="small">仅发送本次问题与拆分指令；不发送法规原文或聊天历史。不勾选则只用原问题本地检索。</p>
+<label class="consent"><input type="checkbox" id="answer-consent" disabled><span>允许 Kimi 阅读必要依据，生成回答</span></label><p class="small">发送本次问题及必要法规片段，每次最多 20 条、12000 字符。生成、依据审查各一次；当前协议可能另做一次不含法规原文的漏答检查。不勾选则只看检索结果。</p>
+</div>
+<div class="followup-control"><label class="consent"><input type="checkbox" id="followup"><span>继续追问最近完成的一题</span></label><p id="followup-help" class="small">追问会发送上一轮用户条件和本次问题，不发送助手旧答案。条件 15 分钟有效；换话题请点「新问题」。</p></div>
+<button id="submit" disabled>开始查找</button><p id="permission" class="small"></p>
+<div class="history-heading"><h2>本页记录</h2><span>仅当前页面</span></div><div id="history"><p class="small">完成一次提问后，会在这里显示。刷新页面不会保留本页记录。</p></div>
+</aside>
+<section class="workspace" aria-label="回答与依据">
+<div class="section-title"><div><span class="eyebrow">有来源，才有据可查</span><h2 id="result-title">等待你的第一个问题</h2></div><button id="download" class="secondary" disabled>导出结果</button></div>
+<div class="status-panel"><div id="progress" role="status" aria-live="polite">正在连接本地服务…</div><span id="elapsed"></span><p id="progress-hint" class="small">首次启动需要加载本机模型，请稍候。</p></div>
+<div id="metrics" class="metrics"></div>
+<div id="answer-box" hidden></div>
+<p id="mode" class="notice">回答以知识库文件为依据，不代表正式法律意见；关键决定请核对原文、适用年份与条件。</p>
+<details id="sources-box" hidden><summary><span id="sources-label">查看知识库原文</span><span class="summary-note">核对出处</span></summary><div id="results"></div></details>
+<div id="welcome" class="empty"><span class="empty-symbol" aria-hidden="true">↗</span><h3>从一个真实问题开始</h3><p>可以问规则、比较不同规定，<br>也可以提供条件和金额，让助手列出计算过程。</p><div class="capabilities"><span>文件依据</span><span>规则计算</span><span>条件更正</span></div><p class="small">不确定的部分会明确标出；处理失败不等于库内没有资料。</p></div>
+<details id="queries-box" hidden><summary>查看处理详情<span class="summary-note">检索策略与耗时</span></summary><div id="queries"></div></details>
+<div id="export-box" hidden><label for="export-json">本次完整结果 JSON（包含问题、回答及相关法规片段）</label><textarea id="export-json" readonly rows="10"></textarea><button id="save-json" class="secondary">保存 JSON 文件</button><p class="small">不会重新发送请求。若浏览器未弹出下载，可复制上方内容；请留意导出文件包含你的问题。</p></div>
+</section>
+</main><footer>本地知识库 · 运算在本机执行 · 不自动重试问题 · 模型核验不等同人工法律审核</footer>
+</body></html>
