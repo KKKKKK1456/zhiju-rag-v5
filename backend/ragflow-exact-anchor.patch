@@ -1,0 +1,285 @@
+diff --git a/rag/nlp/search.py b/rag/nlp/search.py
+index 3839a38..1de9c9f 100644
+--- a/rag/nlp/search.py
++++ b/rag/nlp/search.py
+@@ -20,6 +20,7 @@ from collections import OrderedDict, defaultdict
+ from dataclasses import dataclass
+ 
+ from rag.nlp import rag_tokenizer, query
++from rag.nlp.exact_match import exact_anchor_coverage, extract_exact_anchors, normalize_query
+ import numpy as np
+ from common.doc_store.doc_store_base import MatchDenseExpr, FusionExpr, OrderByExpr, DocStoreConnection
+ from common.string_utils import remove_redundant_spaces
+@@ -127,6 +128,114 @@ class Dealer:
+             group_docs=sres.group_docs,
+         )
+ 
++    @classmethod
++    def _merge_search_results(cls, primary: SearchResult, supplemental: SearchResult) -> SearchResult:
++        """Union a small lexical recall set into the primary candidate window."""
++
++        ids = list(primary.ids)
++        seen = set(ids)
++        for chunk_id in supplemental.ids:
++            if chunk_id not in seen:
++                seen.add(chunk_id)
++                ids.append(chunk_id)
++
++        field = dict(supplemental.field or {})
++        field.update(primary.field or {})
++        if primary.highlight is None and supplemental.highlight is None:
++            highlight = None
++        else:
++            highlight = dict(supplemental.highlight or {})
++            highlight.update(primary.highlight or {})
++
++        keywords = list(primary.keywords or [])
++        keyword_seen = set(keywords)
++        for keyword in supplemental.keywords or []:
++            if keyword not in keyword_seen:
++                keyword_seen.add(keyword)
++                keywords.append(keyword)
++
++        return cls.SearchResult(
++            total=len(ids),
++            ids=ids,
++            query_vector=primary.query_vector,
++            field=field,
++            highlight=highlight,
++            aggregation=primary.aggregation,
++            keywords=keywords,
++            group_docs=primary.group_docs,
++        )
++
++    async def _supplement_exact_anchor_candidates(
++        self,
++        sres: SearchResult,
++        anchors: list[str],
++        req: dict,
++        idx_names: str | list[str],
++        kb_ids: list[str],
++        highlight: bool | list | None,
++        rank_feature: dict | None,
++        page_size: int,
++        rerank_candidates_count: int,
++    ) -> SearchResult:
++        """Add lexical candidates for precise anchors missing from vector recall."""
++
++        if not anchors:
++            return sres
++        exact_req = {
++            "kb_ids": req.get("kb_ids"),
++            "doc_ids": req.get("doc_ids"),
++            "page": 1,
++            "size": min(max(page_size * 2, len(anchors) * 8, 16), rerank_candidates_count),
++            "question": " ".join(anchors),
++            "vector": False,
++            "available_int": req.get("available_int", 1),
++            "exact_anchor_search": True,
++        }
++        if req.get("must_not"):
++            exact_req["must_not"] = req["must_not"]
++        supplemental = await self.search(
++            exact_req,
++            idx_names,
++            kb_ids,
++            emb_mdl=None,
++            highlight=highlight,
++            rank_feature=rank_feature,
++            min_match=False,
++        )
++        merged = self._merge_search_results(sres, supplemental)
++        logging.debug(
++            "[Search] exact-anchor supplement: anchors=%s primary=%s lexical=%s merged=%s",
++            anchors,
++            len(sres.ids),
++            len(supplemental.ids),
++            len(merged.ids),
++        )
++        return merged
++
++    @staticmethod
++    def _blend_exact_anchor_scores(sres: SearchResult, sim, anchors: list[str]):
++        """Make a literal full-anchor match outrank non-matching candidates."""
++
++        scores = np.array(sim, dtype=np.float64)
++        if not anchors or scores.size == 0:
++            return scores, np.zeros(scores.size, dtype=np.float64)
++
++        coverage = np.array(
++            [
++                exact_anchor_coverage(
++                    anchors,
++                    sres.field[chunk_id].get("content_with_weight", ""),
++                    sres.field[chunk_id].get("docnm_kwd", ""),
++                )
++                for chunk_id in sres.ids
++            ],
++            dtype=np.float64,
++        )
++        # Exactness owns the majority of the final score only when the query
++        # itself contains a precise anchor.  Semantic relevance still orders
++        # rows with equal literal coverage.
++        return 0.4 * scores + 0.6 * coverage, coverage
++
+     def get_filters(self, req):
+         condition = dict()
+         for key, field in {"kb_ids": "kb_id", "doc_ids": "doc_id"}.items():
+@@ -589,6 +698,9 @@ class Dealer:
+         if not question:
+             return ranks
+ 
++        question = normalize_query(question)
++        exact_anchors = extract_exact_anchors(question)
++
+         page = max(page, 1)
+         if page * page_size > rerank_candidates_count:
+             raise Exception(f"rerank_candidates_count({rerank_candidates_count}) must be greater than page * page_size({page * page_size}) to ensure correct pagination.")
+@@ -619,6 +731,17 @@ class Dealer:
+         idx_names = [index_name(tid) for tid in tenant_ids]
+         min_match = vector_similarity_weight < 0.8
+         sres = await self.search(req, idx_names, kb_ids, embd_mdl, highlight, rank_feature=rank_feature, min_match=min_match)
++        sres = await self._supplement_exact_anchor_candidates(
++            sres,
++            exact_anchors,
++            req,
++            idx_names,
++            kb_ids,
++            highlight,
++            rank_feature,
++            page_size,
++            rerank_candidates_count,
++        )
+         # Temporary retrieval-side guard: prune chunks whose parent document no
+         # longer exists before reranking and returning results.
+         sres = await self._prune_deleted_chunks(sres)
+@@ -686,7 +809,7 @@ class Dealer:
+                     rank_feature=rank_feature,
+                 )
+ 
+-        sim_np = np.array(sim, dtype=np.float64)
++        sim_np, exact_coverage = self._blend_exact_anchor_scores(sres, sim, exact_anchors)
+         if sim_np.size == 0:
+             ranks["doc_aggs"] = []
+             return ranks
+@@ -738,6 +861,7 @@ class Dealer:
+                 "similarity": float(sim_np[i]),
+                 "vector_similarity": float(vsim[i]),
+                 "term_similarity": float(tsim[i]),
++                "exact_match_similarity": float(exact_coverage[i]),
+                 "vector": chunk.get(vector_column, zero_vector),
+                 "positions": position_int,
+                 "doc_type_kwd": chunk.get("doc_type_kwd", ""),
+diff --git a/rag/nlp/exact_match.py b/rag/nlp/exact_match.py
+new file mode 100644
+index 0000000..77fb452
+--- /dev/null
++++ b/rag/nlp/exact_match.py
+@@ -0,0 +1,107 @@
++#
++#  Copyright 2024 The InfiniFlow Authors. All Rights Reserved.
++#
++#  Licensed under the Apache License, Version 2.0 (the "License");
++#  you may not use this file except in compliance with the License.
++#  You may obtain a copy of the License at
++#
++#      http://www.apache.org/licenses/LICENSE-2.0
++#
++#  Unless required by applicable law or agreed to in writing, software
++#  distributed under the License is distributed on an "AS IS" BASIS,
++#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++#  See the License for the specific language governing permissions and
++#  limitations under the License.
++#
++"""Query normalization and exact-anchor helpers for hybrid retrieval.
++
++The helpers are deliberately domain-neutral.  They protect identifiers and
++explicitly quoted names that embedding search commonly treats as incidental,
++without embedding product-, document-, or benchmark-specific vocabulary in
++the retrieval path.
++"""
++
++from __future__ import annotations
++
++import re
++import unicodedata
++
++
++_DASHES = str.maketrans({
++    "‐": "-",
++    "‑": "-",
++    "‒": "-",
++    "–": "-",
++    "—": "-",
++    "−": "-",
++    "﹣": "-",
++    "－": "-",
++})
++_ZERO_WIDTH_RE = re.compile("[\u200b-\u200d\ufeff]")
++_SPACE_RE = re.compile(r"\s+")
++_MIXED_IDENTIFIER_RE = re.compile(
++    r"(?<![A-Z0-9])(?=[A-Z0-9._/-]{5,})(?=[A-Z0-9._/-]*[A-Z])(?=[A-Z0-9._/-]*\d)[A-Z0-9][A-Z0-9._/-]*(?![A-Z0-9])",
++    re.IGNORECASE,
++)
++_LONG_NUMBER_RE = re.compile(r"(?<!\d)\d{6,}(?!\d)")
++_DOCUMENT_NUMBER_RE = re.compile(
++    r"(?:(?:〔|\[|\()\d{4}(?:〕|\]|\))(?:年)?(?:第)?\d{1,6}号|\d{4}年第?\d{1,6}号)"
++)
++_QUOTED_RE = re.compile(r"《([^《》]{3,80})》|[\"“]([^\"”\n]{3,80})[\"”]")
++
++
++def normalize_query(text: str) -> str:
++    """Normalize presentation variants while preserving query meaning."""
++
++    normalized = unicodedata.normalize("NFKC", str(text or ""))
++    normalized = _ZERO_WIDTH_RE.sub("", normalized).translate(_DASHES)
++    return _SPACE_RE.sub(" ", normalized).strip()
++
++
++def normalize_for_exact_match(text: str) -> str:
++    """Return a punctuation-insensitive canonical form for exact coverage."""
++
++    normalized = normalize_query(text).upper()
++    return "".join(character for character in normalized if character.isalnum())
++
++
++def extract_exact_anchors(text: str, *, limit: int = 8) -> list[str]:
++    """Extract stable literal anchors from a natural-language query.
++
++    Mixed letter/number identifiers, long numeric identifiers, legal-style
++    document numbers, and explicitly quoted names are precise enough to merit
++    an additional lexical candidate lookup.  Ordinary words are intentionally
++    excluded so normal semantic queries keep their existing latency profile.
++    """
++
++    normalized = normalize_query(text)
++    candidates: list[tuple[int, str]] = []
++
++    for match in _QUOTED_RE.finditer(normalized):
++        value = next(group for group in match.groups() if group is not None)
++        candidates.append((match.start(), value.strip()))
++    for pattern in (_MIXED_IDENTIFIER_RE, _LONG_NUMBER_RE, _DOCUMENT_NUMBER_RE):
++        candidates.extend((match.start(), match.group(0).strip()) for match in pattern.finditer(normalized))
++
++    anchors: list[str] = []
++    seen: set[str] = set()
++    for _, candidate in sorted(candidates, key=lambda item: item[0]):
++        canonical = normalize_for_exact_match(candidate)
++        if len(canonical) < 4 or canonical in seen:
++            continue
++        seen.add(canonical)
++        anchors.append(candidate)
++        if len(anchors) >= limit:
++            break
++    return anchors
++
++
++def exact_anchor_coverage(anchors: list[str], *texts: str) -> float:
++    """Return the fraction of query anchors literally present in the texts."""
++
++    canonical_anchors = [normalize_for_exact_match(anchor) for anchor in anchors]
++    canonical_anchors = [anchor for anchor in canonical_anchors if anchor]
++    if not canonical_anchors:
++        return 0.0
++    haystack = normalize_for_exact_match(" ".join(str(text or "") for text in texts))
++    return sum(anchor in haystack for anchor in canonical_anchors) / len(canonical_anchors)
