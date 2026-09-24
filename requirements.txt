@@ -1,0 +1,9 @@
+# Exact host-side versions from the reference installation; Python 3.12.
+# RAGFlow's container has its own dependencies; do not install these into it.
+torch==2.13.0
+transformers==5.14.1
+tokenizers==0.22.2
+huggingface-hub==1.24.0
+numpy==2.5.2
+safetensors==0.8.0
+
